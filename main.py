@@ -5,10 +5,9 @@ import pandas as pd
 import ta
 from flask import Flask, request
 import threading
-
-# === CONFIGURATIE ===
 import os
 from dotenv import load_dotenv
+
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -21,8 +20,8 @@ HEADERS = {"Content-Type": "application/json"}
 SIGNAL_LOOKBACK = 50
 
 app = Flask(__name__)
+actieve_signalen = {}
 
-# === MARKT EN INDICATORFUNCTIES ===
 def get_contracts():
     url = f"{API_BASE}/api/v1/contracts/active"
     try:
@@ -86,29 +85,37 @@ def send_telegram_message(msg):
     except Exception as e:
         print(f"Fout bij versturen bericht: {e}")
 
-# === SCAN FUNCTIE ===
 def scan_and_notify():
+    global actieve_signalen
     contracts = get_contracts()
-    results = []
+    nieuwe_signalen = {}
+
     for sym in contracts:
         df = get_ohlcv(sym)
-        if df is not None:
-            result = check_signals(df)
-            if result:
-                signaal, adx, rsi = result
-                emoji = "🟢" if signaal == "LONG" else "🔴" if signaal == "SHORT" else "🟡"
-                results.append((sym, signaal, adx, rsi, emoji))
+        if df is None:
+            continue
 
-    if results:
-        results.sort(key=lambda x: -x[2])
-        msg = "📊 Huidige kansen (1H):\n"
-        for sym, sig, adx, rsi, emoji in results[:5]:
-            msg += f"{emoji} {sig} — {sym}\nADX: {adx:.1f} | RSI: {rsi:.1f}\n\n"
+        result = check_signals(df)
+        if result:
+            signaal, adx, rsi = result
+            nieuwe_signalen[sym] = {
+                "signaal": signaal,
+                "adx": adx,
+                "rsi": rsi
+            }
+
+    actieve_signalen = nieuwe_signalen
+
+    if actieve_signalen:
+        gesorteerd = sorted(actieve_signalen.items(), key=lambda x: -x[1]['adx'])
+        msg = "📊 Actieve kansen (1H):\n"
+        for sym, data in gesorteerd[:5]:
+            emoji = "🟢" if data["signaal"] == "LONG" else "🔴" if data["signaal"] == "SHORT" else "🟡"
+            msg += f"{emoji} {data['signaal']} — {sym}\nADX: {data['adx']:.1f} | RSI: {data['rsi']:.1f}\n\n"
         send_telegram_message(msg)
     else:
         send_telegram_message("🔍 Geen huidige kansen volgens jouw strategie.")
 
-# === TELEGRAM WEBHOOK ===
 @app.route(f"/{WEBHOOK_SECRET}", methods=['POST'])
 def telegram_webhook():
     data = request.get_json()
@@ -118,6 +125,5 @@ def telegram_webhook():
             threading.Thread(target=scan_and_notify).start()
     return "ok"
 
-# === SERVER START ===
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT)
