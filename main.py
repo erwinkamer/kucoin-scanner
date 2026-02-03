@@ -27,9 +27,13 @@ def get_contracts():
     try:
         res = requests.get(url, headers=HEADERS).json()
         print("Contracts API-response:", res)
-        return [c['symbol'] for c in res['data'] if c['type'] == 'FFutures']
+        send_telegram_message(f"📡 KuCoin API response: {str(res)[:400]}...")  # eerste 400 tekens van respons
+        if "data" in res:
+            return [c['symbol'] for c in res['data'] if c['type'] == 'FFutures']
+        else:
+            return []
     except Exception as e:
-        print(f"Fout bij ophalen contracten: {e}")
+        send_telegram_message(f"❌ Fout bij ophalen contracten: {e}")
         return []
 
 def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
