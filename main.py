@@ -104,7 +104,15 @@ def scan_and_notify():
                 "rsi": rsi
             }
 
-    actieve_signalen = nieuwe_signalen
+    # Behoud signalen zolang ze geldig blijven
+    gecombineerde_signalen = {}
+    for sym in set(list(actieve_signalen.keys()) + list(nieuwe_signalen.keys())):
+        if sym in nieuwe_signalen:
+            gecombineerde_signalen[sym] = nieuwe_signalen[sym]
+        elif sym in actieve_signalen:
+            gecombineerde_signalen[sym] = actieve_signalen[sym]
+
+    actieve_signalen = gecombineerde_signalen
 
     if actieve_signalen:
         gesorteerd = sorted(actieve_signalen.items(), key=lambda x: -x[1]['adx'])
