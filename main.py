@@ -88,9 +88,11 @@ def send_telegram_message(msg):
 def scan_and_notify():
     global actieve_signalen
     contracts = get_contracts()
+    print(f"Aantal contracts opgehaald: {len(contracts)}")
     nieuwe_signalen = {}
 
     for sym in contracts:
+        print(f"Scannen: {sym}")
         df = get_ohlcv(sym)
         if df is None:
             continue
@@ -103,6 +105,8 @@ def scan_and_notify():
                 "adx": adx,
                 "rsi": rsi
             }
+
+    send_telegram_message(f"⚙️ Debug: {len(contracts)} contracts gescand.")
 
     # Behoud signalen zolang ze geldig blijven
     gecombineerde_signalen = {}
