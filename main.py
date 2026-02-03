@@ -88,6 +88,13 @@ def send_telegram_message(msg):
 
 def scan_and_notify():
     global actieve_signalen
+
+    try:
+        test = requests.get("https://api-futures.kucoin.com/api/v1/contracts/active", timeout=5)
+        print("KuCoin teststatus:", test.status_code)
+    except Exception as e:
+        print("Testfout KuCoin API:", e)
+
     contracts = get_contracts()
     print(f"Aantal contracts opgehaald: {len(contracts)}")
     nieuwe_signalen = {}
