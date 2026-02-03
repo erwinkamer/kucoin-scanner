@@ -26,6 +26,7 @@ def get_contracts():
     url = f"{API_BASE}/api/v1/contracts/active"
     try:
         res = requests.get(url, headers=HEADERS).json()
+        print("Contracts API-response:", res)
         return [c['symbol'] for c in res['data'] if c['type'] == 'FFutures']
     except Exception as e:
         print(f"Fout bij ophalen contracten: {e}")
