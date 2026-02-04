@@ -1,5 +1,3 @@
-# KuCoin Perpetual Scanner (1H) - Telegram-gestuurde Signal Detector
-
 import requests
 import pandas as pd
 import ta
@@ -20,6 +18,8 @@ API_BASE = "https://api-futures.kucoin.com"
 HEADERS = {"Content-Type": "application/json"}
 SIGNAL_LOOKBACK = 50
 
+granularity = 60  # 1H in minuten
+
 app = Flask(__name__)
 actieve_signalen = {}
 
@@ -36,7 +36,6 @@ def get_contracts():
     try:
         res = requests.get(url, headers=HEADERS).json()
         all_contracts = res.get('data', [])
-        # Gebruik de originele KuCoin-notatie direct
         filtered = [c['symbol'] for c in all_contracts if c.get('quoteCurrency') == 'USDT' and not c.get('isInverse')]
         send_telegram_message(f"📱 KuCoin: {len(filtered)} perpetual futures gevonden")
         return filtered
@@ -46,42 +45,47 @@ def get_contracts():
 
 def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
     end_ts = int(time.time() * 1000)
-    start_ts = end_ts - limit * 3600 * 1000
+    start_ts = end_ts - (limit * 2 * 3600 * 1000)
 
     url = f"{API_BASE}/api/v1/kline/query"
     params = {
         "symbol": symbol,
-        "granularity": 3600,
+        "granularity": granularity,
         "from": start_ts,
         "to": end_ts
     }
 
     try:
-        print(f"[DEBUG] {symbol} → from={start_ts}, to={end_ts}, granularity=3600")
+        print(f"[DEBUG] {symbol} → from={start_ts}, to={end_ts}, granularity={granularity}")
         res = requests.get(url, headers=HEADERS, params=params).json()
-        if "msg" in res and res["msg"] != "success":
-            print(f"⚠️ KuCoin error bij {symbol}: {res['msg']}")
-        if not res.get("data"):
-            raise Exception(f"Geen data voor {symbol}")
-        data = res['data']
+        if res.get("code") != "200000":
+            print(f"⚠️ KuCoin API Error {symbol}: {res.get('msg')}")
+            return None
+
+        data = res.get("data")
+        if not data:
+            return None
+
         df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','value'])
-        df = df.astype(float)
-        df['close'] = pd.to_numeric(df['close'])
-        df['high'] = pd.to_numeric(df['high'])
-        df['low'] = pd.to_numeric(df['low'])
+        df = df.astype(float).sort_values('ts').reset_index(drop=True)
         return df
     except Exception as e:
         print(f"Fout bij OHLCV {symbol}: {e}")
         return None
 
 def check_signals(df):
-    df['EMA_9'] = ta.trend.ema_indicator(df['close'], window=9).ema_indicator()
-    df['EMA_21'] = ta.trend.ema_indicator(df['close'], window=21).ema_indicator()
+    if len(df) < 30:
+        return None
+
+    df['EMA_9'] = ta.trend.ema_indicator(df['close'], window=9)
+    df['EMA_21'] = ta.trend.ema_indicator(df['close'], window=21)
     df['RSI_14'] = ta.momentum.rsi(df['close'], window=14)
-    adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
-    df['ADX_14'] = adx['ADX_14']
+    df['ADX_14'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close'], window=14).adx()
 
     last = df.iloc[-1]
+    if pd.isna(last['ADX_14']) or pd.isna(last['RSI_14']):
+        return None
+
     ema_bullish = last['EMA_9'] > last['EMA_21']
     ema_bearish = last['EMA_9'] < last['EMA_21']
     rsi_long = last['RSI_14'] > 55
@@ -113,6 +117,7 @@ def scan_and_notify():
     for sym in contracts:
         print(f"Scannen: {sym}")
         df = get_ohlcv(sym)
+        time.sleep(0.1)
         if df is None:
             continue
         symbols_with_data += 1
@@ -127,15 +132,7 @@ def scan_and_notify():
             }
 
     send_telegram_message(f"⚙️ Debug: {len(contracts)} gecheckt, {symbols_with_data} met data")
-
-    gecombineerde_signalen = {}
-    for sym in set(list(actieve_signalen.keys()) + list(nieuwe_signalen.keys())):
-        if sym in nieuwe_signalen:
-            gecombineerde_signalen[sym] = nieuwe_signalen[sym]
-        elif sym in actieve_signalen:
-            gecombineerde_signalen[sym] = actieve_signalen[sym]
-
-    actieve_signalen = gecombineerde_signalen
+    actieve_signalen = nieuwe_signalen
 
     if actieve_signalen:
         gesorteerd = sorted(actieve_signalen.items(), key=lambda x: -x[1]['adx'])
