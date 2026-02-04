@@ -36,7 +36,7 @@ def get_contracts():
     try:
         res = requests.get(url, headers=HEADERS).json()
         all_contracts = res.get('data', [])
-        # Alleen USDT-margined perpetual futures (geen inverse of delivery)
+        # Gebruik de originele KuCoin-notatie direct
         filtered = [c['symbol'] for c in all_contracts if c.get('quoteCurrency') == 'USDT' and not c.get('isInverse')]
         send_telegram_message(f"📱 KuCoin: {len(filtered)} perpetual futures gevonden")
         return filtered
@@ -45,8 +45,8 @@ def get_contracts():
         return []
 
 def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
-    end_ts = int(time.time() * 1000)  # milliseconds
-    start_ts = end_ts - limit * 3600 * 1000  # 50 candles van 1 uur
+    end_ts = int(time.time() * 1000)
+    start_ts = end_ts - limit * 3600 * 1000
 
     url = f"{API_BASE}/api/v1/kline/query"
     params = {
