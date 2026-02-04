@@ -35,24 +35,21 @@ def get_contracts():
     url = f"{API_BASE}/api/v1/contracts/active"
     try:
         res = requests.get(url, headers=HEADERS).json()
-        alle_contracten = res.get("data", [])
-
-        # ✅ Filter: enableTrading + symbol eindigt op M (perpetual)
-        perpetuals = [
-            c["symbol"] for c in alle_contracten
-            if c.get("enableTrading") and c["symbol"].endswith("M")
+        all_contracts = res.get('data', [])
+        # Filter: Alleen perpetuals (FFutures), geen inverse of disabled
+        filtered = [
+            c['symbol'] for c in all_contracts
+            if c.get('type') == 'FFutures' and c.get('enableTrading') and not c.get('isInverse')
         ]
-
-        send_telegram_message(f"📱 KuCoin: {len(perpetuals)} perpetual futures gevonden")
-        return perpetuals
-
+        send_telegram_message(f"📱 KuCoin: {len(filtered)} perpetual futures gevonden")
+        return filtered
     except Exception as e:
         send_telegram_message(f"❌ Fout bij ophalen contracten: {e}")
         return []
 
 def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
     end_ts = int(time.time())
-    start_ts = end_ts - limit * 3600
+    start_ts = end_ts - limit * 3600  # 50 candles van 1 uur
 
     url = f"{API_BASE}/api/v1/kline/query"
     params = {
@@ -69,9 +66,6 @@ def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
         data = res['data']
         df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','value'])
         df = df.astype(float)
-        df['close'] = pd.to_numeric(df['close'])
-        df['high'] = pd.to_numeric(df['high'])
-        df['low'] = pd.to_numeric(df['low'])
         return df
     except Exception as e:
         print(f"Fout bij OHLCV {symbol}: {e}")
@@ -116,7 +110,7 @@ def scan_and_notify():
     for sym in contracts:
         print(f"Scannen: {sym}")
         df = get_ohlcv(sym)
-        if df is None:
+        if df is None or len(df) < SIGNAL_LOOKBACK:
             continue
         symbols_with_data += 1
 
@@ -131,6 +125,7 @@ def scan_and_notify():
 
     send_telegram_message(f"⚙️ Debug: {len(contracts)} gecheckt, {symbols_with_data} met data")
 
+    # Behoud signalen zolang ze geldig blijven
     gecombineerde_signalen = {}
     for sym in set(list(actieve_signalen.keys()) + list(nieuwe_signalen.keys())):
         if sym in nieuwe_signalen:
