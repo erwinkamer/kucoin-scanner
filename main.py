@@ -29,7 +29,7 @@ def get_contracts():
         print("Contracts API-response:", res)
         send_telegram_message(f"📡 KuCoin API response: {str(res)[:400]}...")  # eerste 400 tekens van respons
         if "data" in res:
-            return [c['symbol'] for c in res['data'] if c['type'] == 'FFutures']
+            return [c['symbol'] for c in res['data'] if c['type'].startswith('FF')]
         else:
             return []
     except Exception as e:
