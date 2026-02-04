@@ -36,7 +36,8 @@ def get_contracts():
     try:
         res = requests.get(url, headers=HEADERS).json()
         all_contracts = res.get('data', [])
-        filtered = [c['symbol'] for c in all_contracts if c.get('symbol') and c.get('type', '').startswith('FF')]
+        # Alleen USDT-margined perpetual futures (geen inverse of delivery)
+        filtered = [c['symbol'] for c in all_contracts if c.get('quoteCurrency') == 'USDT' and not c.get('isInverse')]
         send_telegram_message(f"📱 KuCoin: {len(filtered)} perpetual futures gevonden")
         return filtered
     except Exception as e:
@@ -57,6 +58,8 @@ def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
 
     try:
         res = requests.get(url, headers=HEADERS, params=params).json()
+        if "msg" in res and res["msg"] != "success":
+            print(f"⚠️ KuCoin error bij {symbol}: {res['msg']}")
         if not res.get("data"):
             raise Exception(f"Geen data voor {symbol}")
         data = res['data']
@@ -124,7 +127,6 @@ def scan_and_notify():
 
     send_telegram_message(f"⚙️ Debug: {len(contracts)} gecheckt, {symbols_with_data} met data")
 
-    # Behoud signalen zolang ze geldig blijven
     gecombineerde_signalen = {}
     for sym in set(list(actieve_signalen.keys()) + list(nieuwe_signalen.keys())):
         if sym in nieuwe_signalen:
