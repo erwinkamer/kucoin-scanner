@@ -45,8 +45,8 @@ def get_contracts():
         return []
 
 def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
-    end_ts = int(time.time())
-    start_ts = end_ts - limit * 3600  # 50 candles van 1 uur
+    end_ts = int(time.time() * 1000)  # milliseconds
+    start_ts = end_ts - limit * 3600 * 1000  # 50 candles van 1 uur
 
     url = f"{API_BASE}/api/v1/kline/query"
     params = {
