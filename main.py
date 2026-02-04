@@ -36,11 +36,7 @@ def get_contracts():
     try:
         res = requests.get(url, headers=HEADERS).json()
         all_contracts = res.get('data', [])
-        # Filter: Alleen perpetuals (FFutures), geen inverse of disabled
-        filtered = [
-            c['symbol'] for c in all_contracts
-            if c.get('type') == 'FFutures' and c.get('enableTrading') and not c.get('isInverse')
-        ]
+        filtered = [c['symbol'] for c in all_contracts if c.get('symbol') and c.get('type', '').startswith('FF')]
         send_telegram_message(f"📱 KuCoin: {len(filtered)} perpetual futures gevonden")
         return filtered
     except Exception as e:
@@ -66,6 +62,9 @@ def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
         data = res['data']
         df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','value'])
         df = df.astype(float)
+        df['close'] = pd.to_numeric(df['close'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
         return df
     except Exception as e:
         print(f"Fout bij OHLCV {symbol}: {e}")
@@ -110,7 +109,7 @@ def scan_and_notify():
     for sym in contracts:
         print(f"Scannen: {sym}")
         df = get_ohlcv(sym)
-        if df is None or len(df) < SIGNAL_LOOKBACK:
+        if df is None:
             continue
         symbols_with_data += 1
 
