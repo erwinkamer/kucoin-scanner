@@ -26,12 +26,14 @@ def get_contracts():
     url = f"{API_BASE}/api/v1/contracts/active"
     try:
         res = requests.get(url, headers=HEADERS).json()
-        print("Contracts API-response:", res)
-        send_telegram_message(f"📡 KuCoin API response: {str(res)[:400]}...")  # eerste 400 tekens van respons
-        if "data" in res:
-            return [c['symbol'] for c in res['data'] if c['type'].startswith('FF')]
-        else:
-            return []
+        if "data" not in res:
+            raise Exception("Geen 'data' in KuCoin response.")
+        
+        geldige_types = ['FFWCSX', 'FFWCSF', 'FFutures']
+        contracts = [c['symbol'] for c in res['data'] if c['type'] in geldige_types]
+
+        send_telegram_message(f"📡 KuCoin: {len(contracts)} futures gevonden")
+        return contracts
     except Exception as e:
         send_telegram_message(f"❌ Fout bij ophalen contracten: {e}")
         return []
@@ -92,23 +94,16 @@ def send_telegram_message(msg):
 
 def scan_and_notify():
     global actieve_signalen
-
-    try:
-        test = requests.get("https://api-futures.kucoin.com/api/v1/contracts/active", timeout=5)
-        print("KuCoin teststatus:", test.status_code)
-    except Exception as e:
-        print("Testfout KuCoin API:", e)
-
     contracts = get_contracts()
-    print(f"Aantal contracts opgehaald: {len(contracts)}")
+    print(f"✅ Contracts opgehaald: {len(contracts)}")
     nieuwe_signalen = {}
+    geslaagde_ohlcv = 0
 
     for sym in contracts:
-        print(f"Scannen: {sym}")
         df = get_ohlcv(sym)
         if df is None:
             continue
-
+        geslaagde_ohlcv += 1
         result = check_signals(df)
         if result:
             signaal, adx, rsi = result
@@ -118,7 +113,7 @@ def scan_and_notify():
                 "rsi": rsi
             }
 
-    send_telegram_message(f"⚙️ Debug: {len(contracts)} contracts gescand.")
+    send_telegram_message(f"⚙️ Debug: {len(contracts)} contracts gecheckt, {geslaagde_ohlcv} met data")
 
     # Behoud signalen zolang ze geldig blijven
     gecombineerde_signalen = {}
