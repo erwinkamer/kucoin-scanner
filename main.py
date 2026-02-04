@@ -35,16 +35,19 @@ def get_contracts():
     url = f"{API_BASE}/api/v1/contracts/active"
     try:
         res = requests.get(url, headers=HEADERS).json()
-        send_telegram_message(f"📡 KuCoin: {len(res.get('data', []))} futures gevonden")
-        # Filter: Alleen perpetuals, geen inverse of delivery contracts
-        return [c['symbol'] for c in res['data'] if c.get('type') == 'FFutures' and c.get('enableTrading') and not c.get('isInverse')]
+        contracts = [
+            c['symbol'] for c in res.get('data', [])
+            if c.get('enableTrading') and not c.get('isInverse')
+        ]
+        send_telegram_message(f"📱 KuCoin: {len(contracts)} perpetual futures gevonden")
+        return contracts
     except Exception as e:
         send_telegram_message(f"❌ Fout bij ophalen contracten: {e}")
         return []
 
 def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
     end_ts = int(time.time())
-    start_ts = end_ts - limit * 3600  # 50 candles van 1 uur
+    start_ts = end_ts - limit * 3600
 
     url = f"{API_BASE}/api/v1/kline/query"
     params = {
@@ -56,17 +59,14 @@ def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
 
     try:
         res = requests.get(url, headers=HEADERS, params=params).json()
-        if not res.get("data"):
-            raise Exception(f"Geen data voor {symbol}")
-        data = res['data']
+        data = res.get("data", [])
+        if len(data) < 25:
+            return None  # Onvoldoende candles
         df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','value'])
         df = df.astype(float)
-        df['close'] = pd.to_numeric(df['close'])
-        df['high'] = pd.to_numeric(df['high'])
-        df['low'] = pd.to_numeric(df['low'])
         return df
     except Exception as e:
-        print(f"Fout bij OHLCV {symbol}: {e}")
+        print(f"Fout bij ophalen candles voor {symbol}: {e}")
         return None
 
 def check_signals(df):
@@ -77,41 +77,30 @@ def check_signals(df):
     df['ADX_14'] = adx['ADX_14']
 
     last = df.iloc[-1]
-    ema_bullish = last['EMA_9'] > last['EMA_21']
-    ema_bearish = last['EMA_9'] < last['EMA_21']
-    rsi_long = last['RSI_14'] > 55
-    rsi_short = last['RSI_14'] < 45
-    rsi_near_long = 50 < last['RSI_14'] <= 55
-    rsi_near_short = 45 <= last['RSI_14'] < 50
-    adx_strong = last['ADX_14'] > 25
-    adx_rising = 22 <= last['ADX_14'] <= 25
-
-    if adx_strong:
-        if ema_bullish and rsi_long:
+    if last['ADX_14'] > 25:
+        if last['EMA_9'] > last['EMA_21'] and last['RSI_14'] > 55:
             return ("LONG", last['ADX_14'], last['RSI_14'])
-        elif ema_bearish and rsi_short:
+        elif last['EMA_9'] < last['EMA_21'] and last['RSI_14'] < 45:
             return ("SHORT", last['ADX_14'], last['RSI_14'])
-    elif adx_rising:
-        if ema_bullish and rsi_near_long:
+    elif 22 <= last['ADX_14'] <= 25:
+        if last['EMA_9'] > last['EMA_21'] and 50 < last['RSI_14'] <= 55:
             return ("PRE-LONG", last['ADX_14'], last['RSI_14'])
-        elif ema_bearish and rsi_near_short:
+        elif last['EMA_9'] < last['EMA_21'] and 45 <= last['RSI_14'] < 50:
             return ("PRE-SHORT", last['ADX_14'], last['RSI_14'])
     return None
 
 def scan_and_notify():
     global actieve_signalen
     contracts = get_contracts()
-    print(f"Aantal contracts opgehaald: {len(contracts)}")
     nieuwe_signalen = {}
     symbols_with_data = 0
 
     for sym in contracts:
-        print(f"Scannen: {sym}")
         df = get_ohlcv(sym)
+        time.sleep(0.12)  # Respecteer API-limieten (~8 req/sec)
         if df is None:
             continue
         symbols_with_data += 1
-
         result = check_signals(df)
         if result:
             signaal, adx, rsi = result
@@ -121,16 +110,12 @@ def scan_and_notify():
                 "rsi": rsi
             }
 
-    send_telegram_message(f"⚙️ Debug: {len(contracts)} contracts gecheckt, {symbols_with_data} met data")
+    send_telegram_message(f"⚙️ Debug: {len(contracts)} gecheckt, {symbols_with_data} met data")
 
-    # Behoud signalen zolang ze geldig blijven
-    gecombineerde_signalen = {}
-    for sym in set(list(actieve_signalen.keys()) + list(nieuwe_signalen.keys())):
-        if sym in nieuwe_signalen:
-            gecombineerde_signalen[sym] = nieuwe_signalen[sym]
-        elif sym in actieve_signalen:
-            gecombineerde_signalen[sym] = actieve_signalen[sym]
-
+    gecombineerde_signalen = {
+        **{k: v for k, v in actieve_signalen.items() if k not in nieuwe_signalen},
+        **nieuwe_signalen
+    }
     actieve_signalen = gecombineerde_signalen
 
     if actieve_signalen:
