@@ -6,6 +6,7 @@ import ta
 from flask import Flask, request
 import threading
 import os
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -22,29 +23,42 @@ SIGNAL_LOOKBACK = 50
 app = Flask(__name__)
 actieve_signalen = {}
 
+def send_telegram_message(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Fout bij versturen bericht: {e}")
+
 def get_contracts():
     url = f"{API_BASE}/api/v1/contracts/active"
     try:
         res = requests.get(url, headers=HEADERS).json()
-        if "data" not in res:
-            raise Exception("Geen 'data' in KuCoin response.")
-        
-        geldige_types = ['FFWCSX', 'FFWCSF', 'FFutures']
-        contracts = [c['symbol'] for c in res['data'] if c['type'] in geldige_types]
-
-        send_telegram_message(f"📡 KuCoin: {len(contracts)} futures gevonden")
-        return contracts
+        send_telegram_message(f"📡 KuCoin: {len(res.get('data', []))} futures gevonden")
+        # Filter: Alleen perpetuals, geen inverse of delivery contracts
+        return [c['symbol'] for c in res['data'] if c.get('type') == 'FFutures' and c.get('enableTrading') and not c.get('isInverse')]
     except Exception as e:
         send_telegram_message(f"❌ Fout bij ophalen contracten: {e}")
         return []
 
 def get_ohlcv(symbol, limit=SIGNAL_LOOKBACK):
-    url = f"{API_BASE}/api/v1/kline/query?symbol={symbol}&granularity=3600"
+    end_ts = int(time.time())
+    start_ts = end_ts - limit * 3600  # 50 candles van 1 uur
+
+    url = f"{API_BASE}/api/v1/kline/query"
+    params = {
+        "symbol": symbol,
+        "granularity": 3600,
+        "from": start_ts,
+        "to": end_ts
+    }
+
     try:
-        res = requests.get(url, headers=HEADERS).json()
+        res = requests.get(url, headers=HEADERS, params=params).json()
         if not res.get("data"):
             raise Exception(f"Geen data voor {symbol}")
-        data = res['data'][-limit:]
+        data = res['data']
         df = pd.DataFrame(data, columns=['ts','open','high','low','close','vol','value'])
         df = df.astype(float)
         df['close'] = pd.to_numeric(df['close'])
@@ -84,26 +98,20 @@ def check_signals(df):
             return ("PRE-SHORT", last['ADX_14'], last['RSI_14'])
     return None
 
-def send_telegram_message(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Fout bij versturen bericht: {e}")
-
 def scan_and_notify():
     global actieve_signalen
     contracts = get_contracts()
-    print(f"✅ Contracts opgehaald: {len(contracts)}")
+    print(f"Aantal contracts opgehaald: {len(contracts)}")
     nieuwe_signalen = {}
-    geslaagde_ohlcv = 0
+    symbols_with_data = 0
 
     for sym in contracts:
+        print(f"Scannen: {sym}")
         df = get_ohlcv(sym)
         if df is None:
             continue
-        geslaagde_ohlcv += 1
+        symbols_with_data += 1
+
         result = check_signals(df)
         if result:
             signaal, adx, rsi = result
@@ -113,7 +121,7 @@ def scan_and_notify():
                 "rsi": rsi
             }
 
-    send_telegram_message(f"⚙️ Debug: {len(contracts)} contracts gecheckt, {geslaagde_ohlcv} met data")
+    send_telegram_message(f"⚙️ Debug: {len(contracts)} contracts gecheckt, {symbols_with_data} met data")
 
     # Behoud signalen zolang ze geldig blijven
     gecombineerde_signalen = {}
