@@ -1,3 +1,4 @@
+# main.py — Hyperliquid Top-N scanner -> Telegram shortlist + 1-click TradingView links (no mapping)
 import os
 import time
 import math
@@ -14,7 +15,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 load_dotenv()
 
 # =========================
-# ENV / CONFIG
+# ENV / CONFIG (Render)
 # =========================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -25,13 +26,11 @@ PORT = int(os.getenv("PORT", "8080"))
 API_BASE = "https://api.hyperliquid.xyz"
 HEADERS = {"Content-Type": "application/json"}
 
-# Strategy / scan config
-SIGNAL_LOOKBACK = int(os.getenv("SIGNAL_LOOKBACK", "50"))  # candles used for signals
+# Scan config
+SIGNAL_LOOKBACK = int(os.getenv("SIGNAL_LOOKBACK", "50"))  # candles used for signal logic
 CANDLE_BUFFER = int(os.getenv("CANDLE_BUFFER", "20"))      # extra candles for indicator warmup
-CANDLE_INTERVAL = os.getenv("CANDLE_INTERVAL", "1h")       # keep "1h" per your strategy
-
-# Top-N selection on activity/liquidity (free, via metaAndAssetCtxs)
-TOP_N = int(os.getenv("TOP_N", "150"))                     # "vrij groot"
+CANDLE_INTERVAL = os.getenv("CANDLE_INTERVAL", "1h")       # keep 1h per your strategy
+TOP_N = int(os.getenv("TOP_N", "120"))                     # "vrij groot"
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))           # parallel candle fetch workers
 
 # High conviction ping (optional)
@@ -40,6 +39,10 @@ HC_ATR_MIN = float(os.getenv("HC_ATR_MIN", "0.8"))
 HC_ATR_MAX = float(os.getenv("HC_ATR_MAX", "3.5"))
 HC_RSI_LONG = float(os.getenv("HC_RSI_LONG", "60"))
 HC_RSI_SHORT = float(os.getenv("HC_RSI_SHORT", "40"))
+
+# TradingView 1-click chart link (no mapping, TradingView auto-picks feed)
+# Example: https://www.tradingview.com/chart/?symbol=CRYPTO:SOLUSD
+TV_PREFIX = os.getenv("TV_PREFIX", "https://www.tradingview.com/chart/?symbol=CRYPTO:")
 
 app = Flask(__name__)
 
@@ -52,7 +55,7 @@ def send_telegram_message(msg: str) -> None:
         print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "disable_web_page_preview": True}
     try:
         requests.post(url, json=payload, timeout=12)
     except Exception as e:
@@ -68,7 +71,13 @@ def hl_info(payload: dict):
     return r.json()
 
 
-def get_topn_coins_by_activity(top_n: int) -> list:
+def tv_link_for_coin(coin: str) -> str:
+    # zero-maintenance: coin -> COINUSD, let TradingView decide best feed
+    sym = f"{coin}USD"
+    return f"{TV_PREFIX}{sym}"
+
+
+def get_topn_coins_by_activity(top_n: int) -> list[str]:
     """
     Uses Hyperliquid info type=metaAndAssetCtxs to rank coins by:
       - dayNtlVlm (activity proxy)
@@ -76,7 +85,6 @@ def get_topn_coins_by_activity(top_n: int) -> list:
     Returns Top-N coin names (e.g., "BTC", "ETH", ...).
     """
     res = hl_info({"type": "metaAndAssetCtxs"})
-    # Expected shape: [ { "universe":[...] }, [ ctx0, ctx1, ... ] ]
     meta = res[0] if isinstance(res, list) and len(res) >= 2 else {}
     ctxs = res[1] if isinstance(res, list) and len(res) >= 2 else []
 
@@ -106,13 +114,10 @@ def get_topn_coins_by_activity(top_n: int) -> list:
 
         # Activity score: volume heavy + liquidity penalty (bounded)
         activity_score = math.log1p(day_ntl) * (1.0 / (1.0 + 20.0 * impact_spread))
-        rows.append((name, activity_score, day_ntl, impact_spread))
+        rows.append((name, activity_score))
 
     rows.sort(key=lambda x: x[1], reverse=True)
-    top = [r[0] for r in rows[:top_n]]
-
-    send_telegram_message(f"📈 Hyperliquid: Top-{top_n} geselecteerd op activiteit/liquideit (gratis)")
-    return top
+    return [r[0] for r in rows[:top_n]]
 
 
 @retry(
@@ -120,7 +125,7 @@ def get_topn_coins_by_activity(top_n: int) -> list:
     wait=wait_exponential(multiplier=0.8, min=0.8, max=6),
     retry=retry_if_exception_type((requests.RequestException,)),
 )
-def get_ohlcv_hl(coin: str, limit: int):
+def get_ohlcv_hl(coin: str, limit: int) -> pd.DataFrame | None:
     """
     Fetch 1H candles via candleSnapshot and return DataFrame with:
     ['ts','open','high','low','close','vol']
@@ -150,7 +155,6 @@ def get_ohlcv_hl(coin: str, limit: int):
                 continue
             rows.append([float(ts), float(o), float(h), float(l), float(c), float(v)])
         elif isinstance(x, list) and len(x) >= 6:
-            # fallback: [ts, open, high, low, close, volume]
             rows.append([float(x[0]), float(x[1]), float(x[2]), float(x[3]), float(x[4]), float(x[5])])
 
     if not rows:
@@ -166,8 +170,8 @@ def get_ohlcv_hl(coin: str, limit: int):
 
 
 # =========================
-# SIGNALS (UNCHANGED LOGIC)
-# + ATR% ONLY FOR RANKING
+# SIGNALS (same logic as before)
+# ATR% used only for ranking + HC ping
 # =========================
 def check_signals(df: pd.DataFrame):
     if df is None or len(df) < 30:
@@ -178,7 +182,6 @@ def check_signals(df: pd.DataFrame):
     df["RSI_14"] = ta.momentum.rsi(df["close"], window=14)
     df["ADX_14"] = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx()
 
-    # ATR% (ranking only)
     df["ATR_14"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
     df["ATRp_14"] = (df["ATR_14"] / df["close"]) * 100.0
 
@@ -216,13 +219,11 @@ def compute_score(df: pd.DataFrame, signal: str) -> float:
     ema_sep = abs(float(last["EMA_9"]) - float(last["EMA_21"])) / close if close > 0 else 0.0
     atrp = float(last["ATRp_14"])
 
-    # RSI distance from 50 in the direction of the signal
     if signal in ("LONG", "PRE-LONG"):
         rsi_dist = max(0.0, rsi - 50.0)
     else:
         rsi_dist = max(0.0, 50.0 - rsi)
 
-    # ATR sweet spot (day trading)
     atr_bonus = 0.0
     if 0.8 <= atrp <= 3.5:
         atr_bonus = 1.0
@@ -233,9 +234,16 @@ def compute_score(df: pd.DataFrame, signal: str) -> float:
 
     pre_penalty = -2.0 if "PRE" in signal else 0.0
 
-    # score scaling: ema_sep is tiny -> scale up
-    score = (adx * 1.0) + (rsi_dist * 0.6) + (ema_sep * 500.0) + (atr_bonus * 3.0) + pre_penalty
-    return float(score)
+    return float((adx * 1.0) + (rsi_dist * 0.6) + (ema_sep * 500.0) + (atr_bonus * 3.0) + pre_penalty)
+
+
+def size_hint_from_score(score: float) -> str:
+    # noob-friendly sizing hint (not a command to trade)
+    if score >= 40:
+        return "Setup: A (normale size)"
+    if score >= 34:
+        return "Setup: B (kleiner)"
+    return "Setup: C (heel klein / alleen als chart perfect is)"
 
 
 def is_high_conviction(signaal: str, adx: float, rsi: float, atrp: float) -> bool:
@@ -256,14 +264,12 @@ def is_high_conviction(signaal: str, adx: float, rsi: float, atrp: float) -> boo
 def scan_and_notify():
     t0 = time.time()
 
-    # 1) Select Top-N coins (free, 1 call)
     try:
         coins = get_topn_coins_by_activity(TOP_N)
     except Exception as e:
         send_telegram_message(f"❌ Fout bij Top-N selectie (metaAndAssetCtxs): {e}")
         return
 
-    # 2) Fetch candles in parallel and compute signals
     results = []
     count_no_data = 0
     count_no_signal = 0
@@ -298,28 +304,44 @@ def scan_and_notify():
         f"⚙️ Debug: Top-{len(coins)} gescand | signals={count_with_signal} | no_signal={count_no_signal} | no_data={count_no_data} | {dt:.1f}s"
     )
 
-    # 3) Always show Top-5 (A)
     if not results:
         send_telegram_message("🔍 Geen huidige kansen volgens jouw strategie (Top-N scan).")
         return
 
     results.sort(key=lambda x: x[5], reverse=True)
 
-    msg = "📊 Beste kansen (1H) — Hyperliquid\n"
+    msg = "📊 Beste kansen (1H) — Hyperliquid\n(klik link → TradingView chart opent)\n\n"
     for coin, signaal, adx, rsi, atrp, score in results[:5]:
         emoji = "🟢" if signaal == "LONG" else "🔴" if signaal == "SHORT" else "🟡"
-        msg += (
-            f"{emoji} {signaal} — {coin}\n"
-            f"ADX: {adx:.1f} | RSI: {rsi:.1f} | ATR%: {atrp:.2f} | Score: {score:.1f}\n\n"
-        )
+        tv = tv_link_for_coin(coin)
+        hint = size_hint_from_score(score)
+
+        # Make PRE extremely obvious
+        if "PRE" in signaal:
+            msg += (
+                f"{emoji} ⚠️ {signaal} — {coin}\n"
+                f"Dit is een VOOR-signaal (kijken, niet blind traden)\n"
+                f"ADX: {adx:.1f} | RSI: {rsi:.1f} | ATR%: {atrp:.2f} | Score: {score:.1f}\n"
+                f"{hint}\n"
+                f"Open chart:\n{tv}\n\n"
+            )
+        else:
+            msg += (
+                f"{emoji} {signaal} — {coin}\n"
+                f"ADX: {adx:.1f} | RSI: {rsi:.1f} | ATR%: {atrp:.2f} | Score: {score:.1f}\n"
+                f"{hint}\n"
+                f"Open chart:\n{tv}\n\n"
+            )
+
     send_telegram_message(msg)
 
-    # 4) Optional: High conviction ping (free)
-    best = results[0]
-    coin, signaal, adx, rsi, atrp, score = best
+    # Optional: High conviction ping
+    coin, signaal, adx, rsi, atrp, score = results[0]
     if is_high_conviction(signaal, adx, rsi, atrp):
         send_telegram_message(
-            f"🔥 HIGH CONVICTION: {signaal} — {coin} | ADX {adx:.1f} | RSI {rsi:.1f} | ATR% {atrp:.2f}"
+            f"🔥 HIGH CONVICTION (check chart): {signaal} — {coin}\n"
+            f"ADX {adx:.1f} | RSI {rsi:.1f} | ATR% {atrp:.2f}\n"
+            f"Open chart:\n{tv_link_for_coin(coin)}"
         )
 
 
