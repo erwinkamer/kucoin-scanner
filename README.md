@@ -1,1 +1,1 @@
-# kucoin-scanner
+# Hyperliquid-scanner
