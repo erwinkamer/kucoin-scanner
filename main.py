@@ -31,7 +31,7 @@ CANDLE_BUFFER = int(os.getenv("CANDLE_BUFFER", "20"))      # extra candles for i
 CANDLE_INTERVAL = os.getenv("CANDLE_INTERVAL", "1h")       # keep "1h" per your strategy
 
 # Top-N selection on activity/liquidity (free, via metaAndAssetCtxs)
-TOP_N = int(os.getenv("TOP_N", "120"))                     # "vrij groot"
+TOP_N = int(os.getenv("TOP_N", "150"))                     # "vrij groot"
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))           # parallel candle fetch workers
 
 # High conviction ping (optional)
