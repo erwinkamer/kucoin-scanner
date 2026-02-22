@@ -1,4 +1,6 @@
 # main.py — Hyperliquid Top-N scanner -> Telegram shortlist + 1-click TradingView links (no mapping)
+# Includes: PRE vs ENTRY clarity + Regime (TREND/CHOP/NEUTRAL) aligned with TradingView script
+
 import os
 import time
 import math
@@ -29,9 +31,13 @@ HEADERS = {"Content-Type": "application/json"}
 # Scan config
 SIGNAL_LOOKBACK = int(os.getenv("SIGNAL_LOOKBACK", "50"))  # candles used for signal logic
 CANDLE_BUFFER = int(os.getenv("CANDLE_BUFFER", "20"))      # extra candles for indicator warmup
-CANDLE_INTERVAL = os.getenv("CANDLE_INTERVAL", "1h")       # keep 1h per your strategy
+CANDLE_INTERVAL = os.getenv("CANDLE_INTERVAL", "1h")       # 1h strategy
 TOP_N = int(os.getenv("TOP_N", "120"))                     # "vrij groot"
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))           # parallel candle fetch workers
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))           # parallel fetch
+
+# Thresholds (keep aligned with Pine)
+ADX_TREND_THR = float(os.getenv("ADX_TREND_THR", "25"))
+ADX_CHOP_THR = float(os.getenv("ADX_CHOP_THR", "20"))
 
 # High conviction ping (optional)
 HC_ADX = float(os.getenv("HC_ADX", "30"))
@@ -40,7 +46,7 @@ HC_ATR_MAX = float(os.getenv("HC_ATR_MAX", "3.5"))
 HC_RSI_LONG = float(os.getenv("HC_RSI_LONG", "60"))
 HC_RSI_SHORT = float(os.getenv("HC_RSI_SHORT", "40"))
 
-# TradingView 1-click chart link (no mapping, TradingView auto-picks feed)
+# TradingView 1-click chart link (no mapping; TradingView auto-picks feed)
 # Example: https://www.tradingview.com/chart/?symbol=CRYPTO:SOLUSD
 TV_PREFIX = os.getenv("TV_PREFIX", "https://www.tradingview.com/chart/?symbol=CRYPTO:")
 
@@ -63,6 +69,23 @@ def send_telegram_message(msg: str) -> None:
 
 
 # =========================
+# UTIL
+# =========================
+def tv_link_for_coin(coin: str) -> str:
+    sym = f"{coin}USD"
+    return f"{TV_PREFIX}{sym}"
+
+
+def regime_from_adx(adx: float) -> str:
+    # aligned with Pine thresholds
+    if adx > ADX_TREND_THR:
+        return "TREND"
+    if adx < ADX_CHOP_THR:
+        return "CHOP"
+    return "NEUTRAL"
+
+
+# =========================
 # HYPERLIQUID HELPERS
 # =========================
 def hl_info(payload: dict):
@@ -71,17 +94,9 @@ def hl_info(payload: dict):
     return r.json()
 
 
-def tv_link_for_coin(coin: str) -> str:
-    # zero-maintenance: coin -> COINUSD, let TradingView decide best feed
-    sym = f"{coin}USD"
-    return f"{TV_PREFIX}{sym}"
-
-
 def get_topn_coins_by_activity(top_n: int) -> list[str]:
     """
-    Uses Hyperliquid info type=metaAndAssetCtxs to rank coins by:
-      - dayNtlVlm (activity proxy)
-      - impact spread proxy (liquidity penalty)
+    Uses Hyperliquid info type=metaAndAssetCtxs to rank coins by activity proxy.
     Returns Top-N coin names (e.g., "BTC", "ETH", ...).
     """
     res = hl_info({"type": "metaAndAssetCtxs"})
@@ -170,8 +185,7 @@ def get_ohlcv_hl(coin: str, limit: int) -> pd.DataFrame | None:
 
 
 # =========================
-# SIGNALS (same logic as before)
-# ATR% used only for ranking + HC ping
+# SIGNALS (same logic as your KuCoin bot)
 # =========================
 def check_signals(df: pd.DataFrame):
     if df is None or len(df) < 30:
@@ -191,12 +205,14 @@ def check_signals(df: pd.DataFrame):
 
     ema_bullish = last["EMA_9"] > last["EMA_21"]
     ema_bearish = last["EMA_9"] < last["EMA_21"]
+
     rsi_long = last["RSI_14"] > 55
     rsi_short = last["RSI_14"] < 45
     rsi_near_long = 50 < last["RSI_14"] <= 55
     rsi_near_short = 45 <= last["RSI_14"] < 50
-    adx_strong = last["ADX_14"] > 25
-    adx_rising = 22 <= last["ADX_14"] <= 25
+
+    adx_strong = last["ADX_14"] > ADX_TREND_THR
+    adx_rising = 22 <= last["ADX_14"] <= ADX_TREND_THR
 
     if adx_strong:
         if ema_bullish and rsi_long:
@@ -212,6 +228,9 @@ def check_signals(df: pd.DataFrame):
 
 
 def compute_score(df: pd.DataFrame, signal: str) -> float:
+    """
+    Ranking score (does NOT change strategy). Used only to sort Top-5 output.
+    """
     last = df.iloc[-1]
     adx = float(last["ADX_14"])
     rsi = float(last["RSI_14"])
@@ -238,7 +257,6 @@ def compute_score(df: pd.DataFrame, signal: str) -> float:
 
 
 def size_hint_from_score(score: float) -> str:
-    # noob-friendly sizing hint (not a command to trade)
     if score >= 40:
         return "Setup: A (normale size)"
     if score >= 34:
@@ -310,24 +328,27 @@ def scan_and_notify():
 
     results.sort(key=lambda x: x[5], reverse=True)
 
-    msg = "📊 Beste kansen (1H) — Hyperliquid\n(klik link → TradingView chart opent)\n\n"
+    msg = "📊 Beste kansen (1H) — Hyperliquid\nKlik link → TradingView chart opent\n\n"
+
     for coin, signaal, adx, rsi, atrp, score in results[:5]:
-        emoji = "🟢" if signaal == "LONG" else "🔴" if signaal == "SHORT" else "🟡"
         tv = tv_link_for_coin(coin)
+        regime = regime_from_adx(adx)
         hint = size_hint_from_score(score)
 
-        # Make PRE extremely obvious
         if "PRE" in signaal:
             msg += (
-                f"{emoji} ⚠️ {signaal} — {coin}\n"
-                f"Dit is een VOOR-signaal (kijken, niet blind traden)\n"
+                f"🟡 ⚠️ PRE — {coin}\n"
+                f"Regime: {regime}\n"
                 f"ADX: {adx:.1f} | RSI: {rsi:.1f} | ATR%: {atrp:.2f} | Score: {score:.1f}\n"
+                f"Dit is een VOOR-signaal (kijken, niet blind traden)\n"
                 f"{hint}\n"
                 f"Open chart:\n{tv}\n\n"
             )
         else:
+            emoji = "🟢" if signaal == "LONG" else "🔴"
             msg += (
                 f"{emoji} {signaal} — {coin}\n"
+                f"Regime: {regime}\n"
                 f"ADX: {adx:.1f} | RSI: {rsi:.1f} | ATR%: {atrp:.2f} | Score: {score:.1f}\n"
                 f"{hint}\n"
                 f"Open chart:\n{tv}\n\n"
@@ -335,11 +356,12 @@ def scan_and_notify():
 
     send_telegram_message(msg)
 
-    # Optional: High conviction ping
+    # Optional: High conviction ping (top result only)
     coin, signaal, adx, rsi, atrp, score = results[0]
     if is_high_conviction(signaal, adx, rsi, atrp):
         send_telegram_message(
             f"🔥 HIGH CONVICTION (check chart): {signaal} — {coin}\n"
+            f"Regime: {regime_from_adx(adx)}\n"
             f"ADX {adx:.1f} | RSI {rsi:.1f} | ATR% {atrp:.2f}\n"
             f"Open chart:\n{tv_link_for_coin(coin)}"
         )
